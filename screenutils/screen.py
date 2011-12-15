@@ -4,17 +4,24 @@
 # the extent permitted by applicable law. You can redistribute it
 # and/or modify it under the terms of the GNU Public License 2 or upper.
 # Please ask if you wish a more permissive license.
-
-from screenutils.errors import ScreenNotFoundError
-
-try:
-    from commands import getoutput
-except:
-    from subprocess import getoutput
-from threading import Thread
-from os import system
+import subprocess
 from os.path import isfile, getsize
 from time import sleep
+
+from errors import ScreenNotFoundError
+
+
+def _check_output(*popenargs, **kwargs):
+    """ Does the same thing as subprocess.check_output but ignores the return code.
+    
+    This is done becaues screen does not always return exit code 0
+    when running normal commands.
+    'screen -ls' returns exit code 1 and therefore the normal check_output fails.
+    
+    """
+    process = subprocess.Popen(stdout=subprocess.PIPE, *popenargs, **kwargs)
+    output, unused_err = process.communicate()
+    return output
 
 def tailf(file_):
     """Each value is content added to the log file since last value return"""
@@ -31,15 +38,20 @@ def tailf(file_):
         else:
             yield ""
 
+def list_session_names():
+    """List all the exists sessions
+    """
+    output = _check_output("screen -ls | grep -P '\t'", shell=True).split('\n')
+    return [
+                ".".join(l.split(".")[1:]).split("\t")[0]
+                for l in output
+                if ".".join(l.split(".")[1:]).split("\t")[0]
+            ]
 
 def list_screens():
     """List all the existing screens and build a Screen instance for each
     """
-    return [
-                Screen(".".join(l.split(".")[1:]).split("\t")[0])
-                for l in getoutput("screen -ls | grep -P '\t'").split('\n')
-                if ".".join(l.split(".")[1:]).split("\t")[0]
-            ]
+    return map(lambda x: Screen(x), list_session_names())
 
 
 class Screen(object):
@@ -84,13 +96,12 @@ class Screen(object):
         # Parse the screen -ls call, to find if the screen exists or not.
         # The screen -ls | grep name returns something like that:
         #  "	28062.G.Terminal	(Detached)"
-        lines = getoutput("screen -ls | grep " + self.name).split('\n')
-        return self.name in [".".join(l.split(".")[1:]).split("\t")[0]
-                             for l in lines]
+        sessions = list_session_names()
+        return self.name in sessions
 
     def enable_logs(self):
         self._screen_commands("logfile " + self.name, "log on")
-        system('touch '+self.name)
+        subprocess.call(["touch", self.name])
         self.logs=tailf(self.name)
         next(self.logs)
 
@@ -98,15 +109,14 @@ class Screen(object):
         self._screen_commands("log off")
         self.logs=None
 
-    def initialize(self):
+    def initialize(self, force=False):
         """initialize a screen, if does not exists yet"""
-        if not self.exists:
+        if force or not self.exists:
             self._id=None
-            # Detach the screen once attached, on a new tread.
-            Thread(target=self._delayed_detach).start()
-            # support Unicode (-U),
-            # attach to a new/existing named screen (-R).
-            system('screen -UR ' + self.name)
+            subprocess.call(["screen", "-Udm", self.name])
+            
+            # make sure that backspace works as expected!
+            self.send_commands("stty kill \\\^U erase \\\^H")
 
     def interrupt(self):
         """Insert CTRL+C in the screen session"""
@@ -119,14 +129,13 @@ class Screen(object):
     def detach(self):
         """detach the screen"""
         self._check_exists()
-        system("screen -d " + self.name)
+        subprocess.call(["screen", "-d", self.name])
 
     def send_commands(self, *commands):
         """send commands to the active gnu-screen"""
         self._check_exists()
         for command in commands:
-            self._screen_commands( 'stuff "' + command + '" ' ,
-                                   'eval "stuff \\015"' )
+            self._screen_commands( 'stuff "' + command + '"\r')#, 'eval "stuff \r"' )
 
     def add_user_access(self, unix_user_name):
         """allow to share your session with an other unix user"""
@@ -137,7 +146,8 @@ class Screen(object):
         a glossary of the existing screen command in `man screen`"""
         self._check_exists()
         for command in commands:
-            system('screen -x ' + self.name + ' -X ' + command)
+            cmd = ["screen", "-r", self.name, "-p", "0", "-X", command]
+            subprocess.call(" ".join(cmd), shell=True)
             sleep(0.02)
 
     def _check_exists(self, message="Error code: 404"):
@@ -148,17 +158,13 @@ class Screen(object):
     def _set_screen_infos(self):
         """set the screen information related parameters"""
         if self.exists:
-            infos = getoutput("screen -ls | grep %s" % self.name).split('\t')[1:]
+            infos = _check_output("screen -ls | grep %s" % self.name, shell=True).split('\t')[1:]
             self._id = infos[0].split('.')[0]
             if len(infos)==3:
                 self._date = infos[1][1:-1]
-                self._status = infos[2][1:-1]
+                self._status = infos[2][1:-2]
             else:
-                self._status = infos[1][1:-1]
-
-    def _delayed_detach(self):
-        sleep(0.5)
-        self.detach()
+                self._status = infos[1][1:-2]
 
     def __repr__(self):
         return "<%s '%s'>" % (self.__class__.__name__, self.name)
