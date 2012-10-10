@@ -114,9 +114,6 @@ class Screen(object):
         if force or not self.exists:
             self._id=None
             subprocess.call(["screen", "-Udm", self.name])
-            
-            # make sure that backspace works as expected!
-            self.send_commands("stty kill \\\^U erase \\\^H")
 
     def interrupt(self):
         """Insert CTRL+C in the screen session"""
